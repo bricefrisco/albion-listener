@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 )
 
 //go:embed assets/*.json
@@ -67,22 +65,12 @@ func sanitizeValues(v any) any {
 		return val
 
 	case []uint8: // treat as bytes, convert to list of ints
-		if !utf8.Valid(val) {
-			return val // binary -> keep as is
+		ints := make([]int, len(val))
+		for i, b := range val {
+			ints[i] = int(b)
 		}
+		return ints
 
-		s := string(val)
-		trim := strings.TrimSpace(s)
-
-		if len(trim) > 0 && (trim[0] == '{' || trim[0] == '[') {
-			var parsed any
-			err := json.Unmarshal(val, &parsed)
-			if err == nil {
-				return sanitizeValues(parsed) // sanitize the JSON-decoded structure
-			}
-		}
-
-		return s
 	default:
 		return val
 	}
