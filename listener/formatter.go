@@ -85,6 +85,11 @@ func toMessage(msg reliableMessage, params map[uint8]any) *Message {
 	switch msg.messageType {
 	case eventDataType:
 		messageType = "Event"
+		_, ok := params[252]
+		if !ok {
+			name = "Move"
+			break
+		}
 		name, ok = eventCodes[fmt.Sprintf("%v", params[252])]
 		if !ok {
 			fmt.Println("Unknown event code:", params[252])
