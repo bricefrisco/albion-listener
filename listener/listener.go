@@ -122,5 +122,5 @@ func (l *Listener) onReliableCommand(command *photonCommand) {
 		return
 	}
 
-	l.messages <- toMessage(params)
+	l.messages <- toMessage(msg, params)
 }

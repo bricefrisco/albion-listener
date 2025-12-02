@@ -16,7 +16,6 @@ var (
 )
 
 func init() {
-	// Read event and operation codes from JSON files
 	ec, err := assets.ReadFile("assets/eventCodes.json")
 	if err != nil {
 		panic(fmt.Sprintf("failed to read event codes: %v", err))
@@ -76,33 +75,39 @@ func sanitizeValues(v any) any {
 	}
 }
 
-func toMessage(msg map[uint8]any) *Message {
-	vals := sanitizeValues(msg)
+func toMessage(msg reliableMessage, params map[uint8]any) *Message {
+	vals := sanitizeValues(params)
 
-	var eventType string
+	var messageType string
 	var name string
 	var ok bool
-	if msg[252] != nil {
-		eventType = "event"
-		name, ok = eventCodes[fmt.Sprintf("%v", msg[252])]
+
+	switch msg.messageType {
+	case eventDataType:
+		messageType = "Event"
+		name, ok = eventCodes[fmt.Sprintf("%v", params[252])]
 		if !ok {
-			fmt.Println("Unknown operation code:", msg[252])
-			name = fmt.Sprintf("Unknown (%v)", msg[252])
+			fmt.Println("Unknown event code:", params[252])
+			name = fmt.Sprintf("Unknown (%v)", params[252])
 		}
-	} else if msg[253] != nil {
-		eventType = "operation"
-		name, ok = operationCodes[fmt.Sprintf("%v", msg[253])]
+	case operationRequest:
+		messageType = "OperationRequest"
+		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
 		if !ok {
-			fmt.Println("Unknown operation code:", msg[253])
-			name = fmt.Sprintf("Unknown (%v)", msg[253])
+			fmt.Println("Unknown operation request code:", params[253])
+			name = fmt.Sprintf("Unknown (%v)", params[253])
 		}
-	} else {
-		eventType = "event"
-		name = "Move"
+	case operationResponse:
+		messageType = "OperationResponse"
+		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
+		if !ok {
+			fmt.Println("Unknown operation response code:", params[253])
+			name = fmt.Sprintf("Unknown (%v)", params[253])
+		}
 	}
 
 	m := &Message{
-		Type: eventType,
+		Type: messageType,
 		Name: name,
 		Data: vals,
 	}
