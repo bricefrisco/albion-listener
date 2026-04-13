@@ -75,47 +75,86 @@ func sanitizeValues(v any) any {
 	}
 }
 
-func toMessage(msg reliableMessage, params map[uint8]any) *Message {
-	vals := sanitizeValues(params)
+// toInt converts any numeric type the Protocol18 deserializer may produce to int.
+func toInt(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case byte:
+		return int(val), true
+	case int16:
+		return int(val), true
+	case uint16:
+		return int(val), true
+	case int32:
+		return int(val), true
+	case uint32:
+		return int(val), true
+	case int64:
+		return int(val), true
+	case uint64:
+		return int(val), true
+	}
+	return 0, false
+}
 
-	var messageType string
-	var name string
-	var ok bool
-
-	switch msg.messageType {
-	case eventDataType:
-		messageType = "Event"
-		_, ok := params[252]
-		if !ok {
-			name = "Move"
-			break
-		}
-		name, ok = eventCodes[fmt.Sprintf("%v", params[252])]
-		if !ok {
-			fmt.Println("Unknown event code:", params[252])
-			name = fmt.Sprintf("Unknown (%v)", params[252])
-		}
-	case operationRequest:
-		messageType = "OperationRequest"
-		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
-		if !ok {
-			fmt.Println("Unknown operation request code:", params[253])
-			name = fmt.Sprintf("Unknown (%v)", params[253])
-		}
-	case operationResponse:
-		messageType = "OperationResponse"
-		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
-		if !ok {
-			fmt.Println("Unknown operation response code:", params[253])
-			name = fmt.Sprintf("Unknown (%v)", params[253])
+func resolveOperationCode(opCode byte, params map[byte]interface{}) int {
+	if v, ok := params[253]; ok {
+		if code, ok := toInt(v); ok {
+			return code
 		}
 	}
+	return int(opCode)
+}
 
-	m := &Message{
-		Type: messageType,
+func resolveEventCode(code byte, params map[byte]interface{}) int {
+	if v, ok := params[252]; ok {
+		if c, ok := toInt(v); ok {
+			return c
+		}
+	}
+	return int(code)
+}
+
+func toRequestMessage(opCode byte, params map[byte]interface{}) *Message {
+	code := resolveOperationCode(opCode, params)
+	key := strconv.Itoa(code)
+	name, ok := operationCodes[key]
+	if !ok {
+		fmt.Println("Unknown operation request code:", code)
+		name = fmt.Sprintf("Unknown (%v)", code)
+	}
+	return &Message{
+		Type: "OperationRequest",
 		Name: name,
-		Data: vals,
+		Data: sanitizeValues(params),
 	}
+}
 
-	return m
+func toResponseMessage(opCode byte, params map[byte]interface{}) *Message {
+	code := resolveOperationCode(opCode, params)
+	key := strconv.Itoa(code)
+	name, ok := operationCodes[key]
+	if !ok {
+		fmt.Println("Unknown operation response code:", code)
+		name = fmt.Sprintf("Unknown (%v)", code)
+	}
+	return &Message{
+		Type: "OperationResponse",
+		Name: name,
+		Data: sanitizeValues(params),
+	}
+}
+
+func toEventMessage(code byte, params map[byte]interface{}) *Message {
+	c := resolveEventCode(code, params)
+	key := strconv.Itoa(c)
+	name, ok := eventCodes[key]
+	if !ok {
+		fmt.Println("Unknown event code:", c)
+		name = fmt.Sprintf("Unknown (%v)", c)
+	}
+	return &Message{
+		Type: "Event",
+		Name: name,
+		Data: sanitizeValues(params),
+	}
 }
