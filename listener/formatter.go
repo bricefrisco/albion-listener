@@ -75,47 +75,44 @@ func sanitizeValues(v any) any {
 	}
 }
 
-func toMessage(msg reliableMessage, params map[uint8]any) *Message {
-	vals := sanitizeValues(params)
-
-	var messageType string
-	var name string
-	var ok bool
-
-	switch msg.messageType {
-	case eventDataType:
-		messageType = "Event"
-		_, ok := params[252]
-		if !ok {
-			name = "Move"
-			break
-		}
-		name, ok = eventCodes[fmt.Sprintf("%v", params[252])]
-		if !ok {
-			fmt.Println("Unknown event code:", params[252])
-			name = fmt.Sprintf("Unknown (%v)", params[252])
-		}
-	case operationRequest:
-		messageType = "OperationRequest"
-		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
-		if !ok {
-			fmt.Println("Unknown operation request code:", params[253])
-			name = fmt.Sprintf("Unknown (%v)", params[253])
-		}
-	case operationResponse:
-		messageType = "OperationResponse"
-		name, ok = operationCodes[fmt.Sprintf("%v", params[253])]
-		if !ok {
-			fmt.Println("Unknown operation response code:", params[253])
-			name = fmt.Sprintf("Unknown (%v)", params[253])
-		}
+func toRequestMessage(opCode byte, params map[byte]interface{}) *Message {
+	key := strconv.Itoa(int(opCode))
+	name, ok := operationCodes[key]
+	if !ok {
+		fmt.Println("Unknown operation request code:", opCode)
+		name = fmt.Sprintf("Unknown (%v)", opCode)
 	}
-
-	m := &Message{
-		Type: messageType,
+	return &Message{
+		Type: "OperationRequest",
 		Name: name,
-		Data: vals,
+		Data: sanitizeValues(params),
 	}
+}
 
-	return m
+func toResponseMessage(opCode byte, params map[byte]interface{}) *Message {
+	key := strconv.Itoa(int(opCode))
+	name, ok := operationCodes[key]
+	if !ok {
+		fmt.Println("Unknown operation response code:", opCode)
+		name = fmt.Sprintf("Unknown (%v)", opCode)
+	}
+	return &Message{
+		Type: "OperationResponse",
+		Name: name,
+		Data: sanitizeValues(params),
+	}
+}
+
+func toEventMessage(code byte, params map[byte]interface{}) *Message {
+	key := strconv.Itoa(int(code))
+	name, ok := eventCodes[key]
+	if !ok {
+		fmt.Println("Unknown event code:", code)
+		name = fmt.Sprintf("Unknown (%v)", code)
+	}
+	return &Message{
+		Type: "Event",
+		Name: name,
+		Data: sanitizeValues(params),
+	}
 }

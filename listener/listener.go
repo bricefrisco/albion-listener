@@ -14,16 +14,17 @@ type Message struct {
 	Data any    `json:"data"`
 }
 
-var buffer = newFragmentBuffer()
-
 type Listener struct {
 	messages chan *Message
+	parser   *photonParser
 }
 
 func NewListener(messages chan *Message) *Listener {
-	return &Listener{
+	l := &Listener{
 		messages: messages,
 	}
+	l.parser = newPhotonParser(l.onRequest, l.onResponse, l.onEvent)
+	return l
 }
 
 func (l *Listener) Run() {
@@ -53,9 +54,6 @@ func (l *Listener) Run() {
 				return
 			}
 
-			layers.RegisterUDPPortLayerType(layers.UDPPort(5056), photonLayerType)
-			layers.RegisterTCPPortLayerType(layers.TCPPort(5056), photonLayerType)
-
 			source := gopacket.NewPacketSource(handle, handle.LinkType())
 			packets := source.Packets()
 
@@ -71,56 +69,37 @@ func (l *Listener) Run() {
 
 func (l *Listener) processPacket(packet gopacket.Packet) {
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
-
 	if ipLayer == nil {
 		return
 	}
 
 	ipv4 := ipLayer.(*layers.IPv4)
-
 	if ipv4.SrcIP == nil {
 		return
 	}
 
-	layer := packet.Layer(photonLayerType)
-	if layer == nil {
+	var payload []byte
+	if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+		payload = udpLayer.(*layers.UDP).Payload
+	} else if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		payload = tcpLayer.(*layers.TCP).Payload
+	}
+
+	if len(payload) == 0 {
 		return
 	}
-	content, _ := layer.(photonLayer)
 
-	for _, command := range content.commands {
-		switch command.commandType {
-		case sendReliableType:
-			l.onReliableCommand(&command)
-		case sendUnreliableType:
-			var s = make([]byte, len(command.data)-4)
-			copy(s, command.data[4:])
-			command.data = s
-			command.length -= 4
-			command.commandType = 6
-			l.onReliableCommand(&command)
-		case sendReliableFragmentType:
-			msg, _ := command.reliableFragment()
-			result := buffer.offer(msg)
-			if result != nil {
-				l.onReliableCommand(result)
-			}
-		}
-	}
+	l.parser.receivePacket(payload)
 }
 
-func (l *Listener) onReliableCommand(command *photonCommand) {
-	msg, err := command.reliableMessage()
-	if err != nil {
-		log.Println(err)
-		return
-	}
+func (l *Listener) onRequest(opCode byte, params map[byte]interface{}) {
+	l.messages <- toRequestMessage(opCode, params)
+}
 
-	params, err := decodeReliableMessage(msg)
-	if err != nil {
-		log.Println(err)
-		return
-	}
+func (l *Listener) onResponse(opCode byte, _ int16, _ string, params map[byte]interface{}) {
+	l.messages <- toResponseMessage(opCode, params)
+}
 
-	l.messages <- toMessage(msg, params)
+func (l *Listener) onEvent(code byte, params map[byte]interface{}) {
+	l.messages <- toEventMessage(code, params)
 }

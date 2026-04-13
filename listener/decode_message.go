@@ -4,279 +4,444 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
+	"reflect"
 )
 
+// Protocol18 type codes
 const (
-	nilType        = 42
-	dictionaryType = 68
-	int8Type       = 98
-	float32Type    = 102
-	int32Type      = 105
-	int16Type      = 107
-	int64Type      = 108
-	booleanType    = 111
-	stringType     = 115
-	int8SliceType  = 120
-	sliceType      = 121
+	typeUnknown       = byte(0)
+	typeBoolean       = byte(2)
+	typeByte          = byte(3)
+	typeShort         = byte(4)
+	typeFloat         = byte(5)
+	typeDouble        = byte(6)
+	typeString        = byte(7)
+	typeNull          = byte(8)
+	typeCompressedInt = byte(9)
+	typeCompressedLng = byte(10)
+	typeInt1          = byte(11)
+	typeInt1Neg       = byte(12)
+	typeInt2          = byte(13)
+	typeInt2Neg       = byte(14)
+	typeLong1         = byte(15)
+	typeLong1Neg      = byte(16)
+	typeLong2         = byte(17)
+	typeLong2Neg      = byte(18)
+	typeCustom        = byte(19)
+	typeDictionary    = byte(20)
+	typeHashtable     = byte(21)
+	typeObjectArray   = byte(23)
+	typeOpRequest     = byte(24)
+	typeOpResp        = byte(25)
+	typeEventData     = byte(26)
+	typeBoolFalse     = byte(27)
+	typeBoolTrue      = byte(28)
+	typeShortZero     = byte(29)
+	typeIntZero       = byte(30)
+	typeLongZero      = byte(31)
+	typeFloatZero     = byte(32)
+	typeDoubleZero    = byte(33)
+	typeByteZero      = byte(34)
+	typeArray         = byte(0x40)
+	customSlimBase    = byte(0x80)
 )
 
-func decodeReliableMessage(msg reliableMessage) (map[uint8]any, error) {
-	buf := bytes.NewBuffer(msg.data)
-	params := make(map[uint8]interface{})
+// deserializeParameterTable parses a Protocol18 parameter table from raw bytes.
+func deserializeParameterTable(data []byte) map[byte]interface{} {
+	return readParameterTable(bytes.NewBuffer(data))
+}
 
-	for i := 0; i < int(msg.parameterCount); i++ {
-		var paramId uint8
-		var paramType uint8
-
-		if err := binary.Read(buf, binary.BigEndian, &paramId); err != nil {
-			return nil, err
-		}
-
-		if err := binary.Read(buf, binary.BigEndian, &paramType); err != nil {
-			return nil, err
-		}
-
-		paramValue, err := decodeType(buf, paramType)
+func readParameterTable(buf *bytes.Buffer) map[byte]interface{} {
+	count := int(readCount(buf))
+	params := make(map[byte]interface{}, count)
+	for i := 0; i < count && buf.Len() > 0; i++ {
+		key, err := buf.ReadByte()
 		if err != nil {
-			return nil, err
+			break
 		}
-
-		params[paramId] = paramValue
+		tc, err := buf.ReadByte()
+		if err != nil {
+			break
+		}
+		params[key] = deserialize(buf, tc)
 	}
-
-	return params, nil
+	return params
 }
 
-func decodeType(buf *bytes.Buffer, paramType uint8) (any, error) {
-	switch paramType {
-	case nilType:
-		return nil, nil
-	case dictionaryType:
-		return decodeDictionary(buf)
-	case int8Type:
-		return decodeInt8(buf)
-	case float32Type:
-		return decodeFloat32(buf)
-	case int32Type:
-		return decodeInt32(buf)
-	case int16Type:
-		return decodeInt16(buf)
-	case int64Type:
-		return decodeInt64(buf)
-	case booleanType:
-		return decodeBoolean(buf)
-	case stringType:
-		return decodeString(buf)
-	case int8SliceType:
-		return decodeInt8Slice(buf)
-	case sliceType:
-		return decodeSliceType(buf)
+func deserialize(buf *bytes.Buffer, tc byte) interface{} {
+	if tc >= customSlimBase {
+		return deserializeCustom(buf, tc)
+	}
+	switch tc {
+	case typeUnknown, typeNull:
+		return nil
+	case typeBoolean:
+		b, _ := buf.ReadByte()
+		return b != 0
+	case typeByte:
+		b, _ := buf.ReadByte()
+		return b
+	case typeShort:
+		return readInt16(buf)
+	case typeFloat:
+		return readFloat32(buf)
+	case typeDouble:
+		return readFloat64(buf)
+	case typeString:
+		return readString(buf)
+	case typeCompressedInt:
+		return readCompressedInt32(buf)
+	case typeCompressedLng:
+		return readCompressedInt64(buf)
+	case typeInt1:
+		b, _ := buf.ReadByte()
+		return int32(b)
+	case typeInt1Neg:
+		b, _ := buf.ReadByte()
+		return -int32(b)
+	case typeInt2:
+		return int32(readUint16(buf))
+	case typeInt2Neg:
+		return -int32(readUint16(buf))
+	case typeLong1:
+		b, _ := buf.ReadByte()
+		return int64(b)
+	case typeLong1Neg:
+		b, _ := buf.ReadByte()
+		return -int64(b)
+	case typeLong2:
+		return int64(readUint16(buf))
+	case typeLong2Neg:
+		return -int64(readUint16(buf))
+	case typeCustom:
+		return deserializeCustom(buf, 0)
+	case typeDictionary:
+		return deserializeDictionary(buf)
+	case typeHashtable:
+		return deserializeHashtable(buf)
+	case typeObjectArray:
+		return deserializeObjectArray(buf)
+	case typeOpRequest:
+		return deserializeOpRequestInner(buf)
+	case typeOpResp:
+		return deserializeOpRespInner(buf)
+	case typeEventData:
+		return deserializeEventDataInner(buf)
+	case typeBoolFalse:
+		return false
+	case typeBoolTrue:
+		return true
+	case typeShortZero:
+		return int16(0)
+	case typeIntZero:
+		return int32(0)
+	case typeLongZero:
+		return int64(0)
+	case typeFloatZero:
+		return float32(0)
+	case typeDoubleZero:
+		return float64(0)
+	case typeByteZero:
+		return byte(0)
+	case typeArray:
+		return deserializeNestedArray(buf)
 	default:
-		return nil, fmt.Errorf("unsupported type %d", paramType)
+		if tc&typeArray == typeArray {
+			return deserializeTypedArray(buf, tc&^typeArray)
+		}
+		return fmt.Sprintf("ERROR - unknown type 0x%02X", tc)
 	}
 }
 
-func decodeSliceType(buf *bytes.Buffer) (any, error) {
-	var length uint16
-	var sType uint8
-
-	if err := binary.Read(buf, binary.BigEndian, &length); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Read(buf, binary.BigEndian, &sType); err != nil {
-		return nil, err
-	}
-
-	switch sType {
-	case int8Type:
-		return decodeInt8Slice(buf)
-	case int16Type:
-		return decodeInt16Slice(buf, length)
-	case int32Type:
-		return decodeInt32Slice(buf, length)
-	case int64Type:
-		return decodeInt64Slice(buf, length)
-	case float32Type:
-		return decodeFloat32Slice(buf, length)
-	case stringType:
-		return decodeStringSlice(buf, length)
-	case booleanType:
-		return decodeBooleanSlice(buf, length)
-	case sliceType:
-		return decodeSliceSlice(buf, length)
+func deserializeTypedArray(buf *bytes.Buffer, elemType byte) interface{} {
+	size := int(readCount(buf))
+	switch elemType {
+	case typeBoolean:
+		result := make([]bool, size)
+		packedBytes := (size + 7) / 8
+		packed := make([]byte, packedBytes)
+		buf.Read(packed)
+		for i := 0; i < size; i++ {
+			result[i] = (packed[i/8] & (1 << uint(i%8))) != 0
+		}
+		return result
+	case typeByte:
+		data := make([]byte, size)
+		buf.Read(data)
+		return data
+	case typeShort:
+		result := make([]int16, size)
+		for i := range result {
+			result[i] = readInt16(buf)
+		}
+		return result
+	case typeFloat:
+		result := make([]float32, size)
+		for i := range result {
+			result[i] = readFloat32(buf)
+		}
+		return result
+	case typeDouble:
+		result := make([]float64, size)
+		for i := range result {
+			result[i] = readFloat64(buf)
+		}
+		return result
+	case typeString:
+		result := make([]string, size)
+		for i := range result {
+			result[i] = readString(buf)
+		}
+		return result
+	case typeCustom:
+		customTypeID, _ := buf.ReadByte()
+		result := make([]interface{}, size)
+		for i := range result {
+			result[i] = deserializeCustomPayload(buf, customTypeID, false)
+		}
+		return result
+	case typeDictionary:
+		result := make([]interface{}, size)
+		for i := range result {
+			result[i] = deserializeDictionary(buf)
+		}
+		return result
+	case typeHashtable:
+		result := make([]interface{}, size)
+		for i := range result {
+			result[i] = deserializeHashtable(buf)
+		}
+		return result
+	case typeCompressedInt:
+		result := make([]int32, size)
+		for i := range result {
+			result[i] = readCompressedInt32(buf)
+		}
+		return result
+	case typeCompressedLng:
+		result := make([]int64, size)
+		for i := range result {
+			result[i] = readCompressedInt64(buf)
+		}
+		return result
 	default:
-		return nil, fmt.Errorf("unsupported type %d", sType)
+		result := make([]interface{}, size)
+		for i := range result {
+			result[i] = deserialize(buf, elemType)
+		}
+		return result
 	}
 }
 
-func decodeInt8(buf *bytes.Buffer) (value int8, err error) {
-	err = binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeInt16(buf *bytes.Buffer) (value int16, err error) {
-	err = binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeInt32(buf *bytes.Buffer) (value int32, err error) {
-	err = binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeInt64(buf *bytes.Buffer) (value int64, err error) {
-	err = binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeFloat32(buf *bytes.Buffer) (value float32, err error) {
-	err = binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeString(buf *bytes.Buffer) (string, error) {
-	var length uint16
-	if err := binary.Read(buf, binary.BigEndian, &length); err != nil {
-		return "", err
-	}
-
-	str := make([]byte, length)
-	if _, err := buf.Read(str); err != nil {
-		return "", err
-	}
-
-	return string(str), nil
-}
-
-func decodeBoolean(buf *bytes.Buffer) (bool, error) {
-	var value uint8
-	err := binary.Read(buf, binary.BigEndian, &value)
+func deserializeNestedArray(buf *bytes.Buffer) interface{} {
+	size := int(readCount(buf))
+	tc, err := buf.ReadByte()
 	if err != nil {
-		return false, err
+		return nil
 	}
+	result := make([]interface{}, size)
+	for i := range result {
+		result[i] = deserialize(buf, tc)
+	}
+	return result
+}
 
-	if value == 0 {
-		return false, nil
-	} else if value == 1 {
-		return true, nil
+func deserializeObjectArray(buf *bytes.Buffer) interface{} {
+	size := int(readCount(buf))
+	result := make([]interface{}, size)
+	for i := range result {
+		tc, err := buf.ReadByte()
+		if err != nil {
+			break
+		}
+		result[i] = deserialize(buf, tc)
+	}
+	return result
+}
+
+func deserializeDictionary(buf *bytes.Buffer) map[interface{}]interface{} {
+	keyTC, _ := buf.ReadByte()
+	valTC, _ := buf.ReadByte()
+	count := int(readCount(buf))
+	out := make(map[interface{}]interface{}, count)
+	for i := 0; i < count && buf.Len() > 0; i++ {
+		var kt byte
+		if keyTC == 0 {
+			kt, _ = buf.ReadByte()
+		} else {
+			kt = keyTC
+		}
+		var vt byte
+		if valTC == 0 {
+			vt, _ = buf.ReadByte()
+		} else {
+			vt = valTC
+		}
+		key := deserialize(buf, kt)
+		val := deserialize(buf, vt)
+		if isComparable(key) {
+			out[key] = val
+		} else {
+			out[fmt.Sprintf("UNHASHABLE_%d_%T", i, key)] = val
+		}
+	}
+	return out
+}
+
+func deserializeHashtable(buf *bytes.Buffer) map[interface{}]interface{} {
+	return deserializeDictionary(buf)
+}
+
+func deserializeCustom(buf *bytes.Buffer, gpType byte) interface{} {
+	var customID byte
+	isSlim := gpType >= customSlimBase
+	if isSlim {
+		customID = gpType & 0x7F
 	} else {
-		return false, fmt.Errorf("invalid value for boolean of %d", value)
+		customID, _ = buf.ReadByte()
 	}
+	return deserializeCustomPayload(buf, customID, isSlim)
 }
 
-func decodeDictionary(buf *bytes.Buffer) (map[interface{}]interface{}, error) {
-	var keyTypeCode uint8
-	var valueTypeCode uint8
-	var length uint16
-
-	if err := binary.Read(buf, binary.BigEndian, &keyTypeCode); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Read(buf, binary.BigEndian, &valueTypeCode); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Read(buf, binary.BigEndian, &length); err != nil {
-		return nil, err
-	}
-
-	dictionary := make(map[interface{}]interface{}, length)
-	for i := 0; i < int(length); i++ {
-		key, err := decodeType(buf, keyTypeCode)
-		if err != nil {
-			return nil, err
+func deserializeCustomPayload(buf *bytes.Buffer, customID byte, isSlim bool) interface{} {
+	size := int(readCount(buf))
+	if size < 0 || size > buf.Len() {
+		if isSlim {
+			data := make([]byte, buf.Len())
+			buf.Read(data)
+			return map[string]interface{}{"type": customID, "data": data}
 		}
+		return nil
+	}
+	data := make([]byte, size)
+	buf.Read(data)
+	return map[string]interface{}{"type": customID, "data": data}
+}
 
-		value, err := decodeType(buf, valueTypeCode)
-		if err != nil {
-			return nil, err
+func deserializeOpRequestInner(buf *bytes.Buffer) interface{} {
+	opCode, _ := buf.ReadByte()
+	params := readParameterTable(buf)
+	return map[string]interface{}{"operationCode": opCode, "parameters": params}
+}
+
+func deserializeOpRespInner(buf *bytes.Buffer) interface{} {
+	if buf.Len() < 3 {
+		return nil
+	}
+	opCode, _ := buf.ReadByte()
+	returnCode := readInt16(buf)
+	debugMsg := ""
+	if buf.Len() > 0 {
+		tc, _ := buf.ReadByte()
+		if v, ok := deserialize(buf, tc).(string); ok {
+			debugMsg = v
 		}
-
-		dictionary[key] = value
 	}
-
-	return dictionary, nil
-}
-
-func decodeInt8Slice(buf *bytes.Buffer) (any, error) {
-	var length uint32
-
-	err := binary.Read(buf, binary.BigEndian, &length)
-	if err != nil {
-		return nil, err
+	params := readParameterTable(buf)
+	return map[string]interface{}{
+		"operationCode": opCode,
+		"returnCode":    returnCode,
+		"debugMessage":  debugMsg,
+		"parameters":    params,
 	}
+}
 
-	byteSlice := make([]byte, length)
-	if _, err := buf.Read(byteSlice); err != nil {
-		return nil, err
+func deserializeEventDataInner(buf *bytes.Buffer) interface{} {
+	code, _ := buf.ReadByte()
+	params := readParameterTable(buf)
+	return map[string]interface{}{"code": code, "parameters": params}
+}
+
+func readInt16(buf *bytes.Buffer) int16 {
+	var v int16
+	binary.Read(buf, binary.LittleEndian, &v)
+	return v
+}
+
+func readUint16(buf *bytes.Buffer) uint16 {
+	var v uint16
+	binary.Read(buf, binary.LittleEndian, &v)
+	return v
+}
+
+func readFloat32(buf *bytes.Buffer) float32 {
+	var bits uint32
+	binary.Read(buf, binary.LittleEndian, &bits)
+	return math.Float32frombits(bits)
+}
+
+func readFloat64(buf *bytes.Buffer) float64 {
+	var bits uint64
+	binary.Read(buf, binary.LittleEndian, &bits)
+	return math.Float64frombits(bits)
+}
+
+func readString(buf *bytes.Buffer) string {
+	length := int(readCompressedUint32(buf))
+	if length <= 0 || length > buf.Len() {
+		return ""
 	}
-
-	int8Slice := make([]int8, length)
-	for i, b := range byteSlice {
-		int8Slice[i] = int8(b)
-	}
-
-	return int8Slice, nil
+	b := make([]byte, length)
+	buf.Read(b)
+	return string(b)
 }
 
-func decodeInt16Slice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]int16, length)
-	err := binary.Read(buf, binary.BigEndian, &value)
-	return value, err
+func readCount(buf *bytes.Buffer) uint32 {
+	return readCompressedUint32(buf)
 }
 
-func decodeInt32Slice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]int32, length)
-	err := binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeInt64Slice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]int64, length)
-	err := binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeFloat32Slice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]float32, length)
-	err := binary.Read(buf, binary.BigEndian, &value)
-	return value, err
-}
-
-func decodeStringSlice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]string, length)
-	for i := 0; i < int(length); i++ {
-		str, err := decodeString(buf)
+func readCompressedUint32(buf *bytes.Buffer) uint32 {
+	var value uint32
+	shift := uint(0)
+	for {
+		b, err := buf.ReadByte()
 		if err != nil {
-			return nil, err
+			return 0
 		}
-		value[i] = str
+		value |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			return value
+		}
+		shift += 7
+		if shift >= 35 {
+			return 0
+		}
 	}
-	return value, nil
 }
 
-func decodeBooleanSlice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]bool, length)
-	for i := 0; i < int(length); i++ {
-		b, err := decodeBoolean(buf)
+func readCompressedUint64(buf *bytes.Buffer) uint64 {
+	var value uint64
+	shift := uint(0)
+	for {
+		b, err := buf.ReadByte()
 		if err != nil {
-			return nil, err
+			return 0
 		}
-		value[i] = b
+		value |= uint64(b&0x7F) << shift
+		if b&0x80 == 0 {
+			return value
+		}
+		shift += 7
+		if shift >= 70 {
+			return 0
+		}
 	}
-	return value, nil
 }
 
-func decodeSliceSlice(buf *bytes.Buffer, length uint16) (any, error) {
-	value := make([]interface{}, length)
-	for i := 0; i < int(length); i++ {
-		subArray, err := decodeSliceType(buf)
-		if err != nil {
-			return nil, err
-		}
-		value[i] = subArray
+func readCompressedInt32(buf *bytes.Buffer) int32 {
+	v := readCompressedUint32(buf)
+	return int32((v >> 1) ^ uint32(-(int32(v & 1))))
+}
+
+func readCompressedInt64(buf *bytes.Buffer) int64 {
+	v := readCompressedUint64(buf)
+	return int64((v >> 1) ^ uint64(-(int64(v & 1))))
+}
+
+func isComparable(v interface{}) bool {
+	if v == nil {
+		return true
 	}
-	return value, nil
+	return reflect.TypeOf(v).Comparable()
 }

@@ -3,253 +3,264 @@ package listener
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
-	"github.com/google/gopacket"
 )
 
 const (
-	// commands
-	acknowledgeType          = 1
-	connectType              = 2
-	verifyConnectType        = 3
-	disconnectType           = 4
-	pingType                 = 5
-	sendReliableType         = 6
-	sendUnreliableType       = 7
-	sendReliableFragmentType = 8
-	// Message types
-	operationRequest       = 2
-	otherOperationResponse = 3
-	eventDataType          = 4
-	operationResponse      = 7
+	photonHeaderLength   = 12
+	commandHeaderLength  = 12
+	fragmentHeaderLength = 20
 )
 
-var photonCommandHeaderLength = 12
+const (
+	cmdDisconnect     = byte(4)
+	cmdSendReliable   = byte(6)
+	cmdSendUnreliable = byte(7)
+	cmdSendFragment   = byte(8)
+)
 
-type photonCommand struct {
-	// Header
-	commandType            uint8
-	channelID              uint8
-	flags                  uint8
-	reservedByte           uint8
-	length                 int32
-	reliableSequenceNumber int32
+const (
+	msgRequest     = byte(2)
+	msgResponse    = byte(3)
+	msgEvent       = byte(4)
+	msgResponseAlt = byte(7)
+	msgEncrypted   = byte(131)
+)
 
-	// Body
-	data []byte
+type segmentedPackage struct {
+	totalLength  int
+	bytesWritten int
+	payload      []byte
 }
 
-type reliableMessage struct {
-	// Header
-	signature   uint8
-	messageType uint8
-
-	// operationRequest
-	operationCode uint8
-
-	// EventData
-	eventCode uint8
-
-	// operationResponse
-	operationResponseCode uint16
-	operationDebugString  string
-
-	parameterCount int16
-	data           []byte
+type photonParser struct {
+	pendingSegments map[int]*segmentedPackage
+	onRequest       func(operationCode byte, params map[byte]interface{})
+	onResponse      func(operationCode byte, returnCode int16, debugMessage string, params map[byte]interface{})
+	onEvent         func(code byte, params map[byte]interface{})
+	onEncrypted     func()
 }
 
-type reliableFragment struct {
-	sequenceNumber int32
-	fragmentCount  int32
-	fragmentNumber int32
-	totalLength    int32
-	fragmentOffset int32
-
-	data []byte
+func newPhotonParser(
+	onRequest func(byte, map[byte]interface{}),
+	onResponse func(byte, int16, string, map[byte]interface{}),
+	onEvent func(byte, map[byte]interface{}),
+) *photonParser {
+	return &photonParser{
+		pendingSegments: make(map[int]*segmentedPackage),
+		onRequest:       onRequest,
+		onResponse:      onResponse,
+		onEvent:         onEvent,
+	}
 }
 
-type photonLayer struct {
-	// Header
-	peerID       uint16
-	crcEnabled   uint8
-	commandCount uint8
-	timestamp    uint32
-	challenge    int32
+func (p *photonParser) receivePacket(payload []byte) bool {
+	if len(payload) < photonHeaderLength {
+		return false
+	}
 
-	// commands
-	commands []photonCommand
+	offset := 2 // skip peerId (2 bytes)
+	flags := payload[offset]
+	offset++
+	commandCount := int(payload[offset])
+	offset++
+	offset += 8 // skip timestamp (4) + challenge (4)
 
-	// Interface stuff
-	contents []byte
-	payload  []byte
+	if flags == 1 {
+		if p.onEncrypted != nil {
+			p.onEncrypted()
+		}
+		return false
+	}
+
+	for i := 0; i < commandCount; i++ {
+		var ok bool
+		offset, ok = p.handleCommand(payload, offset)
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
-var photonLayerType = gopacket.RegisterLayerType(
-	5056,
-	gopacket.LayerTypeMetadata{
-		Name:    "photonLayerType",
-		Decoder: gopacket.DecodeFunc(decodePhotonPacket)})
-
-func (p photonLayer) LayerType() gopacket.LayerType { return photonLayerType }
-func (p photonLayer) LayerContents() []byte         { return p.contents }
-func (p photonLayer) LayerPayload() []byte          { return p.payload }
-
-func decodePhotonPacket(data []byte, p gopacket.PacketBuilder) error {
-	layer := photonLayer{}
-	buf := bytes.NewBuffer(data)
-
-	// Header
-	if err := binary.Read(buf, binary.BigEndian, &layer.peerID); err != nil {
-		return err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &layer.crcEnabled); err != nil {
-		return err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &layer.commandCount); err != nil {
-		return err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &layer.timestamp); err != nil {
-		return err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &layer.challenge); err != nil {
-		return err
+func (p *photonParser) handleCommand(src []byte, offset int) (int, bool) {
+	if !available(src, offset, commandHeaderLength) {
+		return offset, false
 	}
 
-	// commands
-	var commands []photonCommand
-	for i := 0; i < int(layer.commandCount); i++ {
-		var command photonCommand
+	cmdType := src[offset]
+	offset++
+	offset++ // channelId
+	offset++ // commandFlags
+	offset++ // reserved byte
+	cmdLen := int(binary.BigEndian.Uint32(src[offset:]))
+	offset += 4
+	offset += 4 // reliableSequenceNumber
+	cmdLen -= commandHeaderLength
 
-		// Command header
-		if err := binary.Read(buf, binary.BigEndian, &command.commandType); err != nil {
-			return err
-		}
-		if err := binary.Read(buf, binary.BigEndian, &command.channelID); err != nil {
-			return err
-		}
-		if err := binary.Read(buf, binary.BigEndian, &command.flags); err != nil {
-			return err
-		}
-		if err := binary.Read(buf, binary.BigEndian, &command.reservedByte); err != nil {
-			return err
-		}
-		if err := binary.Read(buf, binary.BigEndian, &command.length); err != nil {
-			return err
-		}
-		if err := binary.Read(buf, binary.BigEndian, &command.reliableSequenceNumber); err != nil {
-			return err
-		}
-
-		// Command data
-		dataLength := int(command.length) - photonCommandHeaderLength
-		if dataLength > buf.Len() {
-			return fmt.Errorf("dataLength %d is greater than buffer length %d", dataLength, buf.Len())
-		}
-
-		command.data = make([]byte, dataLength)
-		if _, err := buf.Read(command.data); err != nil {
-			return err
-		}
-
-		commands = append(commands, command)
+	if cmdLen < 0 || !available(src, offset, cmdLen) {
+		return offset, false
 	}
 
-	layer.commands = commands
-
-	// Split and store the read and unread data
-	dataUsed := len(data) - buf.Len()
-	layer.contents = data[0:dataUsed]
-	layer.payload = buf.Bytes()
-
-	p.AddLayer(layer)
-	return p.NextDecoder(gopacket.LayerTypePayload)
+	switch cmdType {
+	case cmdDisconnect:
+		return offset + cmdLen, true
+	case cmdSendUnreliable:
+		if cmdLen < 4 {
+			return offset + cmdLen, false
+		}
+		offset += 4
+		cmdLen -= 4
+		newOffset, _ := p.handleSendReliable(src, offset, cmdLen)
+		return newOffset, true
+	case cmdSendReliable:
+		newOffset, _ := p.handleSendReliable(src, offset, cmdLen)
+		return newOffset, true
+	case cmdSendFragment:
+		return p.handleSendFragment(src, offset, cmdLen), true
+	default:
+		return offset + cmdLen, true
+	}
 }
 
-func (c *photonCommand) reliableMessage() (msg reliableMessage, err error) {
-	if c.commandType != sendReliableType {
-		return msg, fmt.Errorf("command can't be converted")
+func (p *photonParser) handleSendReliable(src []byte, offset, cmdLen int) (int, bool) {
+	if cmdLen < 2 || !available(src, offset, cmdLen) {
+		return offset + cmdLen, false
 	}
 
-	buf := bytes.NewBuffer(c.data)
+	offset++            // signal byte
+	msgType := src[offset]
+	offset++
+	cmdLen -= 2
 
-	if err = binary.Read(buf, binary.BigEndian, &msg.signature); err != nil {
-		return msg, err
-	}
-	if err = binary.Read(buf, binary.BigEndian, &msg.messageType); err != nil {
-		return msg, err
-	}
-
-	if msg.messageType > 128 {
-		return msg, fmt.Errorf("encryption not supported")
+	if !available(src, offset, cmdLen) {
+		return offset + cmdLen, false
 	}
 
-	if msg.messageType == otherOperationResponse {
-		msg.messageType = operationResponse
+	if msgType == msgEncrypted {
+		if p.onEncrypted != nil {
+			p.onEncrypted()
+		}
+		return offset + cmdLen, true
 	}
 
-	switch msg.messageType {
-	case operationRequest:
-		if err = binary.Read(buf, binary.BigEndian, &msg.operationCode); err != nil {
-			return msg, err
-		}
-	case eventDataType:
-		if err = binary.Read(buf, binary.BigEndian, &msg.eventCode); err != nil {
-			return msg, err
-		}
-	case operationResponse:
-		if err = binary.Read(buf, binary.BigEndian, &msg.operationCode); err != nil {
-			return msg, err
-		}
-		if err = binary.Read(buf, binary.BigEndian, &msg.operationResponseCode); err != nil {
-			return msg, err
-		}
+	data := src[offset : offset+cmdLen]
+	offset += cmdLen
 
-		var paramType uint8
-		if err = binary.Read(buf, binary.BigEndian, &paramType); err != nil {
-			return msg, err
-		}
-
-		paramValue, err := decodeType(buf, paramType)
-		if err != nil {
-			return msg, err
-		}
-
-		if paramValue != nil {
-			msg.operationDebugString = paramValue.(string)
-		}
+	switch msgType {
+	case msgRequest:
+		p.dispatchRequest(data)
+	case msgResponse, msgResponseAlt:
+		p.dispatchResponse(data)
+	case msgEvent:
+		p.dispatchEvent(data)
 	}
 
-	if err = binary.Read(buf, binary.BigEndian, &msg.parameterCount); err != nil {
-		return msg, err
-	}
-
-	msg.data = buf.Bytes()
-	return
+	return offset, true
 }
 
-func (c *photonCommand) reliableFragment() (msg reliableFragment, err error) {
-	if c.commandType != sendReliableFragmentType {
-		return msg, fmt.Errorf("command can't be converted")
+func (p *photonParser) dispatchRequest(data []byte) {
+	if len(data) < 1 {
+		return
+	}
+	opCode := data[0]
+	params := deserializeParameterTable(data[1:])
+	if p.onRequest != nil {
+		p.onRequest(opCode, params)
+	}
+}
+
+func (p *photonParser) dispatchResponse(data []byte) {
+	if len(data) < 3 {
+		return
+	}
+	opCode := data[0]
+	returnCode := int16(binary.LittleEndian.Uint16(data[1:3]))
+
+	buf := bytes.NewBuffer(data[3:])
+	debugMsg := ""
+
+	if buf.Len() > 0 {
+		tc, _ := buf.ReadByte()
+		val := deserialize(buf, tc)
+		switch v := val.(type) {
+		case string:
+			debugMsg = v
+		case []string:
+			// Albion embeds market-order data as a typed string array where the
+			// debug message would normally be. Surface it as params[0].
+			params := map[byte]interface{}{0: v}
+			if p.onResponse != nil {
+				p.onResponse(opCode, returnCode, "", params)
+			}
+			return
+		}
 	}
 
-	buf := bytes.NewBuffer(c.data)
+	params := readParameterTable(buf)
+	if p.onResponse != nil {
+		p.onResponse(opCode, returnCode, debugMsg, params)
+	}
+}
 
-	if err = binary.Read(buf, binary.BigEndian, &msg.sequenceNumber); err != nil {
-		return msg, err
+func (p *photonParser) dispatchEvent(data []byte) {
+	if len(data) < 1 {
+		return
 	}
-	if err = binary.Read(buf, binary.BigEndian, &msg.fragmentCount); err != nil {
-		return msg, err
+	code := data[0]
+	params := deserializeParameterTable(data[1:])
+	if p.onEvent != nil {
+		p.onEvent(code, params)
 	}
-	if err = binary.Read(buf, binary.BigEndian, &msg.fragmentNumber); err != nil {
-		return msg, err
-	}
-	if err = binary.Read(buf, binary.BigEndian, &msg.totalLength); err != nil {
-		return msg, err
-	}
-	if err = binary.Read(buf, binary.BigEndian, &msg.fragmentOffset); err != nil {
-		return msg, err
+}
+
+func (p *photonParser) handleSendFragment(src []byte, offset, cmdLen int) int {
+	if cmdLen < fragmentHeaderLength || !available(src, offset, fragmentHeaderLength) {
+		return offset + cmdLen
 	}
 
-	msg.data = buf.Bytes()
-	return
+	startSeq := int(binary.BigEndian.Uint32(src[offset:]))
+	offset += 4
+	cmdLen -= 4
+	offset += 4 // fragmentCount
+	cmdLen -= 4
+	offset += 4 // fragmentNumber
+	cmdLen -= 4
+	totalLen := int(binary.BigEndian.Uint32(src[offset:]))
+	offset += 4
+	cmdLen -= 4
+	fragOffset := int(binary.BigEndian.Uint32(src[offset:]))
+	offset += 4
+	cmdLen -= 4
+
+	fragLen := cmdLen
+	if fragLen < 0 || !available(src, offset, fragLen) {
+		return offset + fragLen
+	}
+
+	seg, ok := p.pendingSegments[startSeq]
+	if !ok {
+		seg = &segmentedPackage{
+			totalLength: totalLen,
+			payload:     make([]byte, totalLen),
+		}
+		p.pendingSegments[startSeq] = seg
+	}
+
+	end := fragOffset + fragLen
+	if end <= len(seg.payload) {
+		copy(seg.payload[fragOffset:end], src[offset:offset+fragLen])
+	}
+	offset += fragLen
+	seg.bytesWritten += fragLen
+
+	if seg.bytesWritten >= seg.totalLength {
+		delete(p.pendingSegments, startSeq)
+		p.handleSendReliable(seg.payload, 0, len(seg.payload))
+	}
+
+	return offset
+}
+
+func available(src []byte, offset, count int) bool {
+	return count >= 0 && offset >= 0 && len(src)-offset >= count
 }
