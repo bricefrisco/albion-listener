@@ -75,12 +75,52 @@ func sanitizeValues(v any) any {
 	}
 }
 
+// toInt converts any numeric type the Protocol18 deserializer may produce to int.
+func toInt(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case byte:
+		return int(val), true
+	case int16:
+		return int(val), true
+	case uint16:
+		return int(val), true
+	case int32:
+		return int(val), true
+	case uint32:
+		return int(val), true
+	case int64:
+		return int(val), true
+	case uint64:
+		return int(val), true
+	}
+	return 0, false
+}
+
+func resolveOperationCode(opCode byte, params map[byte]interface{}) int {
+	if v, ok := params[253]; ok {
+		if code, ok := toInt(v); ok {
+			return code
+		}
+	}
+	return int(opCode)
+}
+
+func resolveEventCode(code byte, params map[byte]interface{}) int {
+	if v, ok := params[252]; ok {
+		if c, ok := toInt(v); ok {
+			return c
+		}
+	}
+	return int(code)
+}
+
 func toRequestMessage(opCode byte, params map[byte]interface{}) *Message {
-	key := strconv.Itoa(int(opCode))
+	code := resolveOperationCode(opCode, params)
+	key := strconv.Itoa(code)
 	name, ok := operationCodes[key]
 	if !ok {
-		fmt.Println("Unknown operation request code:", opCode)
-		name = fmt.Sprintf("Unknown (%v)", opCode)
+		fmt.Println("Unknown operation request code:", code)
+		name = fmt.Sprintf("Unknown (%v)", code)
 	}
 	return &Message{
 		Type: "OperationRequest",
@@ -90,11 +130,12 @@ func toRequestMessage(opCode byte, params map[byte]interface{}) *Message {
 }
 
 func toResponseMessage(opCode byte, params map[byte]interface{}) *Message {
-	key := strconv.Itoa(int(opCode))
+	code := resolveOperationCode(opCode, params)
+	key := strconv.Itoa(code)
 	name, ok := operationCodes[key]
 	if !ok {
-		fmt.Println("Unknown operation response code:", opCode)
-		name = fmt.Sprintf("Unknown (%v)", opCode)
+		fmt.Println("Unknown operation response code:", code)
+		name = fmt.Sprintf("Unknown (%v)", code)
 	}
 	return &Message{
 		Type: "OperationResponse",
@@ -104,11 +145,12 @@ func toResponseMessage(opCode byte, params map[byte]interface{}) *Message {
 }
 
 func toEventMessage(code byte, params map[byte]interface{}) *Message {
-	key := strconv.Itoa(int(code))
+	c := resolveEventCode(code, params)
+	key := strconv.Itoa(c)
 	name, ok := eventCodes[key]
 	if !ok {
-		fmt.Println("Unknown event code:", code)
-		name = fmt.Sprintf("Unknown (%v)", code)
+		fmt.Println("Unknown event code:", c)
+		name = fmt.Sprintf("Unknown (%v)", c)
 	}
 	return &Message{
 		Type: "Event",
